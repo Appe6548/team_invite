@@ -155,6 +155,7 @@ def init_db():
             name TEXT NOT NULL,
             authorization_token TEXT,
             account_id TEXT,
+            account_email TEXT,
             max_seats INTEGER DEFAULT 5,
             seats_entitled INTEGER DEFAULT 5,
             seats_in_use INTEGER DEFAULT 0,
@@ -198,6 +199,11 @@ def init_db():
     # 添加 pending_invites 列（如果不存在）
     try:
         conn.execute('ALTER TABLE team_accounts ADD COLUMN pending_invites INTEGER DEFAULT 0')
+    except sqlite3.OperationalError:
+        pass  # 列已存在
+    # 添加 account_email 列（如果不存在）
+    try:
+        conn.execute('ALTER TABLE team_accounts ADD COLUMN account_email TEXT')
     except sqlite3.OperationalError:
         pass  # 列已存在
     conn.commit()
@@ -468,7 +474,7 @@ def stats():
 def list_team_accounts():
     conn = get_db()
     accounts = conn.execute('''
-        SELECT id, name, authorization_token, account_id, max_seats, seats_entitled, seats_in_use, pending_invites, enabled, active_until, last_sync, created_at
+        SELECT id, name, authorization_token, account_id, account_email, max_seats, seats_entitled, seats_in_use, pending_invites, enabled, active_until, last_sync, created_at
         FROM team_accounts ORDER BY id ASC
     ''').fetchall()
     
@@ -479,6 +485,7 @@ def list_team_accounts():
             'name': acc['name'],
             'authorizationToken': acc['authorization_token'] or '',
             'accountId': acc['account_id'] or '',
+            'accountEmail': acc['account_email'] or '',
             'maxSeats': acc['max_seats'],
             'enabled': bool(acc['enabled']),
             'seatsInUse': acc['seats_in_use'],
@@ -499,6 +506,7 @@ def create_team_account():
     name = (data.get('name') or '').strip()
     authorization_token = (data.get('authorizationToken') or '').strip()
     account_id = (data.get('accountId') or '').strip()
+    account_email = (data.get('accountEmail') or '').strip()
     max_seats = int(data.get('maxSeats', 5))
     active_until = (data.get('activeUntil') or '').strip() or None
     
@@ -507,8 +515,8 @@ def create_team_account():
     
     conn = get_db()
     cursor = conn.execute(
-        'INSERT INTO team_accounts (name, authorization_token, account_id, max_seats, seats_entitled, active_until) VALUES (?, ?, ?, ?, ?, ?)',
-        (name, authorization_token, account_id, max_seats, max_seats, active_until)
+        'INSERT INTO team_accounts (name, authorization_token, account_id, account_email, max_seats, seats_entitled, active_until) VALUES (?, ?, ?, ?, ?, ?, ?)',
+        (name, authorization_token, account_id, account_email, max_seats, max_seats, active_until)
     )
     new_id = cursor.lastrowid
     conn.commit()
@@ -528,15 +536,16 @@ def update_team_account(account_id):
     name = (data.get('name') or '').strip()
     authorization_token = (data.get('authorizationToken') or '').strip()
     acc_id = (data.get('accountId') or '').strip()
+    account_email = (data.get('accountEmail') or '').strip()
     max_seats = int(data.get('maxSeats', 5))
     enabled = 1 if data.get('enabled', True) else 0
     active_until = (data.get('activeUntil') or '').strip() or None
     
     conn = get_db()
     conn.execute('''
-        UPDATE team_accounts SET name = ?, authorization_token = ?, account_id = ?, max_seats = ?, enabled = ?, active_until = ?
+        UPDATE team_accounts SET name = ?, authorization_token = ?, account_id = ?, account_email = ?, max_seats = ?, enabled = ?, active_until = ?
         WHERE id = ?
-    ''', (name, authorization_token, acc_id, max_seats, enabled, active_until, account_id))
+    ''', (name, authorization_token, acc_id, account_email, max_seats, enabled, active_until, account_id))
     conn.commit()
     conn.close()
     
@@ -754,9 +763,10 @@ def background_sync():
         except Exception as e:
             print(f"[后台同步错误] {e}")
 
+# 确保在 WSGI 模式（如 gunicorn）下也会初始化数据库结构
+init_db()
+
 if __name__ == '__main__':
-    init_db()
-    
     # 启动后台同步线程
     sync_thread = threading.Thread(target=background_sync, daemon=True)
     sync_thread.start()

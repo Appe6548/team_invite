@@ -451,19 +451,22 @@
                 tbody.innerHTML = '<tr><td colspan="6" class="empty-state">暂无车账号</td></tr>';
                 return;
             }
-            tbody.innerHTML = accounts.map(acc => `
-                <tr>
-                    <td><strong>${acc.name}</strong></td>
-                    <td>${acc.seatsInUse} / ${acc.seatsEntitled}</td>
-                    <td>${acc.pendingInvites}</td>
-                    <td class="text-muted">${acc.lastSync ? formatTime(acc.lastSync) : '-'}</td>
-                    <td><span class="badge ${acc.enabled ? 'enabled' : 'disabled'}">${acc.enabled ? '启用' : '禁用'}</span></td>
-                    <td>
-                        <button class="btn btn-ghost btn-sm" onclick="editAccount(${acc.id})">编辑</button>
-                        <button class="btn btn-danger btn-sm" onclick="deleteAccount(${acc.id})">删除</button>
-                    </td>
-                </tr>
-            `).join('');
+	            tbody.innerHTML = accounts.map(acc => `
+	                <tr>
+	                    <td>
+	                        <div><strong>${acc.name}</strong></div>
+	                        ${acc.accountEmail ? `<div class="text-muted" style="margin-top:0.25rem;">${acc.accountEmail}</div>` : ''}
+	                    </td>
+	                    <td>${acc.seatsInUse} / ${acc.seatsEntitled}</td>
+	                    <td>${acc.pendingInvites}</td>
+	                    <td class="text-muted">${acc.lastSync ? formatTime(acc.lastSync) : '-'}</td>
+	                    <td><span class="badge ${acc.enabled ? 'enabled' : 'disabled'}">${acc.enabled ? '启用' : '禁用'}</span></td>
+	                    <td>
+	                        <button class="btn btn-ghost btn-sm" onclick="editAccount(${acc.id})">编辑</button>
+	                        <button class="btn btn-danger btn-sm" onclick="deleteAccount(${acc.id})">删除</button>
+	                    </td>
+	                </tr>
+	            `).join('');
             
             // 更新邀请码生成的下拉框
             updateCodeTeamSelect();
@@ -532,9 +535,9 @@
             return '';
         }
 
-        function extractCredentialsFromSessionText(rawText) {
-            const raw = (rawText || '').trim();
-            if (!raw) return { ok: false, error: '' };
+	        function extractCredentialsFromSessionText(rawText) {
+	            const raw = (rawText || '').trim();
+	            if (!raw) return { ok: false, error: '' };
 
             const parsed = tryParsePossiblyDoubleEncodedJson(raw) ||
                 { ok: false };
@@ -550,30 +553,34 @@
                 }
             }
 
-            if (!obj || typeof obj !== 'object') {
-                // 允许只粘贴 accessToken 本体
-                if (raw.split('.').length >= 3 && raw.length > 80) {
-                    return { ok: true, accessToken: raw, accountId: '' };
-                }
-                return { ok: false, error: '无法解析 Session JSON（请粘贴完整 JSON）' };
-            }
+	            if (!obj || typeof obj !== 'object') {
+	                // 允许只粘贴 accessToken 本体
+	                if (raw.split('.').length >= 3 && raw.length > 80) {
+	                    return { ok: true, accessToken: raw, accountId: '', email: '' };
+	                }
+	                return { ok: false, error: '无法解析 Session JSON（请粘贴完整 JSON）' };
+	            }
 
-            let accessToken =
-                deepFindFirstString(obj, ['accessToken', 'access_token']) ||
-                '';
-            let accountId = '';
-            if (obj.account && typeof obj.account === 'object' && typeof obj.account.id === 'string') {
-                accountId = obj.account.id.trim();
-            }
-            if (!accountId) {
-                accountId = deepFindFirstString(obj, ['accountId', 'account_id', 'chatgptAccountId', 'chatgpt_account_id', 'chatgpt-account-id']);
-            }
+	            let accessToken =
+	                deepFindFirstString(obj, ['accessToken', 'access_token']) ||
+	                '';
+	            let accountId = '';
+	            let email = '';
+	            if (obj.account && typeof obj.account === 'object' && typeof obj.account.id === 'string') {
+	                accountId = obj.account.id.trim();
+	            }
+	            if (obj.user && typeof obj.user === 'object' && typeof obj.user.email === 'string') {
+	                email = obj.user.email.trim();
+	            }
+	            if (!accountId) {
+	                accountId = deepFindFirstString(obj, ['accountId', 'account_id', 'chatgptAccountId', 'chatgpt_account_id', 'chatgpt-account-id']);
+	            }
 
-            if (!accessToken && !accountId) {
-                return { ok: false, error: '未找到 accessToken / account.id（请确认复制的是 Session JSON）' };
-            }
-            return { ok: true, accessToken, accountId };
-        }
+	            if (!accessToken && !accountId) {
+	                return { ok: false, error: '未找到 accessToken / account.id（请确认复制的是 Session JSON）' };
+	            }
+	            return { ok: true, accessToken, accountId, email };
+	        }
 
         function tryFillAccountCredentialsFromSessionJson({ silent } = {}) {
             const sessionEl = document.getElementById('accSessionJson');
@@ -584,25 +591,28 @@
                 return false;
             }
 
-            const { ok, accessToken, accountId, error } = extractCredentialsFromSessionText(raw);
-            if (!ok) {
-                if (!silent && error) setAccountSessionStatus(error, true);
-                return false;
-            }
+	            const { ok, accessToken, accountId, email, error } = extractCredentialsFromSessionText(raw);
+	            if (!ok) {
+	                if (!silent && error) setAccountSessionStatus(error, true);
+	                return false;
+	            }
 
-            const tokenEl = document.getElementById('accToken');
-            const accountEl = document.getElementById('accAccountId');
-            if (tokenEl && accessToken) tokenEl.value = normalizeBearerToken(accessToken);
-            if (accountEl && accountId) accountEl.value = accountId;
+	            const tokenEl = document.getElementById('accToken');
+	            const accountEl = document.getElementById('accAccountId');
+	            const emailEl = document.getElementById('accEmail');
+	            if (tokenEl && accessToken) tokenEl.value = normalizeBearerToken(accessToken);
+	            if (accountEl && accountId) accountEl.value = accountId;
+	            if (emailEl && email) emailEl.value = email;
 
-            if (!silent) {
-                const parts = [];
-                if (accountId) parts.push(`Account ID: ${accountId}${looksLikeUuid(accountId) ? '' : '（请确认）'}`);
-                if (accessToken) parts.push('Token: 已填充');
-                setAccountSessionStatus(parts.length ? `已识别 ${parts.join('，')}` : '');
-            }
-            return true;
-        }
+	            if (!silent) {
+	                const parts = [];
+	                if (accountId) parts.push(`Account ID: ${accountId}${looksLikeUuid(accountId) ? '' : '（请确认）'}`);
+	                if (accessToken) parts.push('Token: 已填充');
+	                if (email) parts.push(`邮箱: ${email}`);
+	                setAccountSessionStatus(parts.length ? `已识别 ${parts.join('，')}` : '');
+	            }
+	            return true;
+	        }
 
         function bindAccountSessionJsonAutoParse() {
             const sessionEl = document.getElementById('accSessionJson');
@@ -616,26 +626,27 @@
             sessionEl.addEventListener('blur', run);
         }
 
-        function showAddAccount() {
-            const form = document.getElementById('accountForm');
-            form.classList.remove('hidden');
-            form.innerHTML = `
-                <h3>添加车账号</h3>
-                <div class="form-row">
-                    <label><span>名称</span><input type="text" id="accName" placeholder="车位名称"></label>
-                    <label><span>最大席位</span><input type="number" id="accMaxSeats" value="5" min="1"></label>
-                </div>
-                <div class="form-row">
-                    <label style="flex: 1; min-width: 260px;">
-                        <span>Session JSON（从浏览器复制）</span>
-                        <textarea id="accSessionJson" placeholder='{"user":{...},"accessToken":"...","account":{"id":"..."}}'></textarea>
-                        <div id="accSessionStatus" class="text-muted" style="margin-top:0.25rem;"></div>
-                    </label>
-                </div>
-                <details style="margin-top:0.25rem;">
-                    <summary class="text-muted" style="cursor:pointer;">高级：手动填写 Token / Account ID</summary>
-                    <div class="form-row" style="margin-top:0.75rem;">
-                        <label><span>Authorization Token</span><input type="text" id="accToken" placeholder="Bearer token"></label>
+	        function showAddAccount() {
+	            const form = document.getElementById('accountForm');
+	            form.classList.remove('hidden');
+	            form.innerHTML = `
+	                <h3>添加车账号</h3>
+	                <div class="form-row">
+	                    <label><span>名称</span><input type="text" id="accName" placeholder="车位名称"></label>
+	                    <label><span>最大席位</span><input type="number" id="accMaxSeats" value="5" min="1"></label>
+	                </div>
+	                <div class="form-row">
+	                    <label style="flex: 1; min-width: 260px;">
+	                        <span>Session JSON（从浏览器复制）</span>
+	                        <textarea id="accSessionJson" placeholder='{"user":{...},"accessToken":"...","account":{"id":"..."}}'></textarea>
+	                        <div id="accSessionStatus" class="text-muted" style="margin-top:0.25rem;"></div>
+	                    </label>
+	                    <input type="hidden" id="accEmail" value="">
+	                </div>
+	                <details style="margin-top:0.25rem;">
+	                    <summary class="text-muted" style="cursor:pointer;">高级：手动填写 Token / Account ID</summary>
+	                    <div class="form-row" style="margin-top:0.75rem;">
+	                        <label><span>Authorization Token</span><input type="text" id="accToken" placeholder="Bearer token"></label>
                     </div>
                     <div class="form-row">
                         <label><span>Account ID</span><input type="text" id="accAccountId" placeholder="Account ID"></label>
@@ -649,20 +660,21 @@
             bindAccountSessionJsonAutoParse();
         }
 
-        function editAccount(id) {
-            const acc = accounts.find(a => a.id === id);
-            if (!acc) return;
-            const form = document.getElementById('accountForm');
-            form.classList.remove('hidden');
-            const hasCreds = Boolean((acc.authorizationToken || '').trim() || (acc.accountId || '').trim());
-            form.innerHTML = `
-                <h3>编辑车账号</h3>
-                <input type="hidden" id="accId" value="${acc.id}">
-                <div class="form-row">
-                    <label><span>名称</span><input type="text" id="accName" value="${acc.name}"></label>
-                    <label><span>最大席位</span><input type="number" id="accMaxSeats" value="${acc.maxSeats}" min="1"></label>
-                    <label><span>状态</span>
-                        <select id="accEnabled">
+	        function editAccount(id) {
+	            const acc = accounts.find(a => a.id === id);
+	            if (!acc) return;
+	            const form = document.getElementById('accountForm');
+	            form.classList.remove('hidden');
+	            const hasCreds = Boolean((acc.authorizationToken || '').trim() || (acc.accountId || '').trim());
+	            form.innerHTML = `
+	                <h3>编辑车账号</h3>
+	                <input type="hidden" id="accId" value="${acc.id}">
+	                <input type="hidden" id="accEmail" value="${acc.accountEmail || ''}">
+	                <div class="form-row">
+	                    <label><span>名称</span><input type="text" id="accName" value="${acc.name}"></label>
+	                    <label><span>最大席位</span><input type="number" id="accMaxSeats" value="${acc.maxSeats}" min="1"></label>
+	                    <label><span>状态</span>
+	                        <select id="accEnabled">
                             <option value="1" ${acc.enabled ? 'selected' : ''}>启用</option>
                             <option value="0" ${!acc.enabled ? 'selected' : ''}>禁用</option>
                         </select>
@@ -712,21 +724,22 @@
 	            }
 	            const authorizationToken = document.getElementById('accToken')?.value.trim() || '';
 	            const accountId = document.getElementById('accAccountId')?.value.trim() || '';
+	            const accountEmail = document.getElementById('accEmail')?.value.trim() || '';
 
 	            if (!name) { alert('请输入名称'); return; }
 
-            let res;
-            if (id) {
-                res = await api(`/admin/team-accounts/${id}`, {
-                    method: 'PUT',
-                    body: JSON.stringify({ name, maxSeats, enabled, authorizationToken, accountId })
-                });
-            } else {
-                res = await api('/admin/team-accounts', {
-                    method: 'POST',
-                    body: JSON.stringify({ name, maxSeats, authorizationToken, accountId })
-                });
-            }
+	            let res;
+	            if (id) {
+	                res = await api(`/admin/team-accounts/${id}`, {
+	                    method: 'PUT',
+	                    body: JSON.stringify({ name, maxSeats, enabled, authorizationToken, accountId, accountEmail })
+	                });
+	            } else {
+	                res = await api('/admin/team-accounts', {
+	                    method: 'POST',
+	                    body: JSON.stringify({ name, maxSeats, authorizationToken, accountId, accountEmail })
+	                });
+	            }
             if (!res.ok) {
                 alert(res.data?.error || '保存失败');
                 return;
