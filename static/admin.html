@@ -145,6 +145,7 @@
             border: none;
             cursor: pointer;
         }
+        .btn:disabled { opacity: 0.5; cursor: not-allowed; }
         .btn-primary { background: var(--primary); color: #fff; }
         .btn-primary:hover { background: #1d4ed8; }
         .btn-ghost { background: transparent; color: var(--text); border: 1px solid var(--border); }
@@ -297,11 +298,15 @@
                             </select>
                             <button class="btn btn-primary" onclick="generateCodes()">生成</button>
                             <button class="btn btn-ghost" onclick="loadCodes()">刷新</button>
+                            <button class="btn btn-ghost" id="codeCopySelectedBtn" onclick="copySelectedCodes()" disabled>复制选中</button>
+                            <button class="btn btn-danger" id="codeDeleteSelectedBtn" onclick="deleteSelectedCodes()" disabled>删除选中</button>
+                            <span id="codeSelectedCount" class="text-muted" style="min-width: 64px; text-align: right;">已选 0</span>
                         </div>
                     </div>
                     <table>
                         <thead>
                             <tr>
+                                <th style="width: 36px;"><input type="checkbox" id="codeSelectAll" title="全选/取消全选"></th>
                                 <th>邀请码</th>
                                 <th>绑定车位</th>
                                 <th>状态</th>
@@ -314,6 +319,7 @@
                         <tbody id="codeList"></tbody>
                     </table>
                 </div>
+                <div id="generatedCodesForm" class="edit-form hidden"></div>
             </div>
 
             <!-- 用户列表 -->
@@ -750,63 +756,208 @@
             }
         }
 
-        async function deleteAccount(id) {
-            if (!confirm('确定删除此车账号？')) return;
-            const { ok, data } = await api(`/admin/team-accounts/${id}`, { method: 'DELETE' });
-            if (!ok) { alert(data.error || '删除失败'); return; }
-            loadAccounts();
-        }
+	        async function deleteAccount(id) {
+	            if (!confirm('确定删除此车账号？')) return;
+	            const { ok, data } = await api(`/admin/team-accounts/${id}`, { method: 'DELETE' });
+	            if (!ok) { alert(data.error || '删除失败'); return; }
+	            loadAccounts();
+	        }
 
-        // ========== 邀请码 ==========
-        async function loadStats() {
-            const { ok, data } = await api('/admin/stats');
-            if (ok) {
-                document.getElementById('statTotal').textContent = data.total;
+	        // ========== 邀请码 ==========
+	        let lastGeneratedCodes = [];
+
+	        async function copyTextToClipboard(text) {
+	            const value = (text || '').toString();
+	            if (!value) return false;
+	            try {
+	                if (navigator.clipboard && window.isSecureContext) {
+	                    await navigator.clipboard.writeText(value);
+	                    return true;
+	                }
+	            } catch {}
+	            try {
+	                const ta = document.createElement('textarea');
+	                ta.value = value;
+	                ta.style.position = 'fixed';
+	                ta.style.left = '-9999px';
+	                ta.style.top = '0';
+	                document.body.appendChild(ta);
+	                ta.focus();
+	                ta.select();
+	                const ok = document.execCommand('copy');
+	                document.body.removeChild(ta);
+	                return ok;
+	            } catch {
+	                return false;
+	            }
+	        }
+
+	        function setGeneratedCodesStatus(message, isError = false) {
+	            const el = document.getElementById('generatedCodesStatus');
+	            if (!el) return;
+	            el.textContent = message || '';
+	            el.className = isError ? 'text-danger' : 'text-muted';
+	        }
+
+	        function hideGeneratedCodes() {
+	            const el = document.getElementById('generatedCodesForm');
+	            if (!el) return;
+	            el.classList.add('hidden');
+	            el.innerHTML = '';
+	            lastGeneratedCodes = [];
+	        }
+
+	        function showGeneratedCodes(codes) {
+	            const list = Array.isArray(codes) ? codes.filter(Boolean) : [];
+	            lastGeneratedCodes = list;
+	            const el = document.getElementById('generatedCodesForm');
+	            if (!el) return;
+	            if (!list.length) {
+	                hideGeneratedCodes();
+	                return;
+	            }
+
+	            el.classList.remove('hidden');
+	            el.innerHTML = `
+	                <h3>本次生成 ${list.length} 个邀请码</h3>
+	                <textarea id="generatedCodesText" readonly></textarea>
+	                <div id="generatedCodesStatus" class="text-muted" style="margin-top:0.25rem;"></div>
+	                <div class="form-actions">
+	                    <button class="btn btn-ghost" onclick="hideGeneratedCodes()">关闭</button>
+	                    <button class="btn btn-primary" onclick="copyGeneratedCodes()">全部复制</button>
+	                </div>
+	            `;
+	            document.getElementById('generatedCodesText').value = list.join('\n');
+	            setGeneratedCodesStatus('点击“全部复制”即可复制到剪贴板');
+	        }
+
+	        async function copyGeneratedCodes() {
+	            if (!lastGeneratedCodes.length) return;
+	            const ok = await copyTextToClipboard(lastGeneratedCodes.join('\n'));
+	            if (ok) setGeneratedCodesStatus(`已复制 ${lastGeneratedCodes.length} 个邀请码`);
+	            else setGeneratedCodesStatus('复制失败，请手动选择复制', true);
+	        }
+
+	        function getSelectedCodeItems() {
+	            return Array.from(document.querySelectorAll('.code-checkbox:checked')).map(cb => ({
+	                id: parseInt(cb.dataset.id, 10),
+	                code: cb.dataset.code || '',
+	                used: cb.dataset.used === '1',
+	            })).filter(i => Number.isFinite(i.id));
+	        }
+
+	        function updateCodeBulkActionsUI() {
+	            const items = getSelectedCodeItems();
+	            const copyBtn = document.getElementById('codeCopySelectedBtn');
+	            const delBtn = document.getElementById('codeDeleteSelectedBtn');
+	            const countEl = document.getElementById('codeSelectedCount');
+	            if (countEl) countEl.textContent = `已选 ${items.length}`;
+	            if (copyBtn) copyBtn.disabled = items.length === 0;
+	            if (delBtn) delBtn.disabled = items.length === 0;
+
+	            const allBox = document.getElementById('codeSelectAll');
+	            const boxes = Array.from(document.querySelectorAll('.code-checkbox'));
+	            const checked = boxes.filter(b => b.checked).length;
+	            if (allBox) {
+	                allBox.checked = boxes.length > 0 && checked === boxes.length;
+	                allBox.indeterminate = checked > 0 && checked < boxes.length;
+	            }
+	        }
+
+	        function bindCodeSelectionEvents() {
+	            const allBox = document.getElementById('codeSelectAll');
+	            if (allBox) {
+	                allBox.onchange = () => {
+	                    document.querySelectorAll('.code-checkbox').forEach(cb => { cb.checked = allBox.checked; });
+	                    updateCodeBulkActionsUI();
+	                };
+	            }
+	            document.querySelectorAll('.code-checkbox').forEach(cb => {
+	                cb.onchange = () => updateCodeBulkActionsUI();
+	            });
+	            updateCodeBulkActionsUI();
+	        }
+
+	        async function copySelectedCodes() {
+	            const items = getSelectedCodeItems();
+	            if (!items.length) { alert('请先选择邀请码'); return; }
+	            const ok = await copyTextToClipboard(items.map(i => i.code).join('\n'));
+	            if (!ok) { alert('复制失败，请手动复制'); return; }
+	            alert(`已复制 ${items.length} 个邀请码`);
+	        }
+
+	        async function deleteSelectedCodes() {
+	            const items = getSelectedCodeItems();
+	            if (!items.length) { alert('请先选择邀请码'); return; }
+
+	            const deletable = items.filter(i => !i.used);
+	            const skipped = items.length - deletable.length;
+	            if (!deletable.length) { alert('选中的邀请码都已使用，无法删除'); return; }
+
+	            const msg = skipped > 0
+	                ? `确定删除选中的 ${deletable.length} 个邀请码？（已使用的 ${skipped} 个将跳过）`
+	                : `确定删除选中的 ${deletable.length} 个邀请码？`;
+	            if (!confirm(msg)) return;
+
+	            const results = await Promise.all(deletable.map(i => api(`/admin/codes/${i.id}`, { method: 'DELETE' })));
+	            const failed = results.filter(r => !r.ok).length;
+	            await loadCodes();
+	            await loadStats();
+	            if (failed) alert(`删除完成，失败 ${failed} 个`);
+	        }
+
+	        async function loadStats() {
+	            const { ok, data } = await api('/admin/stats');
+	            if (ok) {
+	                document.getElementById('statTotal').textContent = data.total;
                 document.getElementById('statUsed').textContent = data.used;
                 document.getElementById('statAvailable').textContent = data.available;
             }
         }
 
-        async function loadCodes() {
-            const { ok, data } = await api('/admin/codes');
-            const tbody = document.getElementById('codeList');
-            
-            if (!ok || !data.codes || data.codes.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="6" class="empty-state">暂无邀请码</td></tr>';
-                return;
-            }
-            
-            tbody.innerHTML = data.codes.map(c => `
-                <tr>
-                    <td><span class="code">${c.code}</span></td>
-                    <td class="text-muted">${c.team_name || '-'}</td>
-                    <td><span class="badge ${c.used ? 'used' : 'available'}">${c.used ? '已使用' : '可用'}</span></td>
-                    <td class="text-muted">${c.used_email || '-'}</td>
-                    <td class="text-muted">${c.used_username || '-'}</td>
-                    <td class="text-muted">${formatTime(c.created_at)}</td>
-                    <td>${!c.used ? `<button class="btn btn-danger btn-sm" onclick="deleteCode(${c.id})">删除</button>` : '-'}</td>
-                </tr>
-            `).join('');
-        }
+	        async function loadCodes() {
+	            const { ok, data } = await api('/admin/codes');
+	            const tbody = document.getElementById('codeList');
+	            
+	            if (!ok || !data.codes || data.codes.length === 0) {
+	                tbody.innerHTML = '<tr><td colspan="8" class="empty-state">暂无邀请码</td></tr>';
+	                bindCodeSelectionEvents();
+	                return;
+	            }
+	            
+	            tbody.innerHTML = data.codes.map(c => `
+	                <tr>
+	                    <td><input type="checkbox" class="code-checkbox" data-id="${c.id}" data-code="${c.code}" data-used="${c.used ? 1 : 0}"></td>
+	                    <td><span class="code">${c.code}</span></td>
+	                    <td class="text-muted">${c.team_name || '-'}</td>
+	                    <td><span class="badge ${c.used ? 'used' : 'available'}">${c.used ? '已使用' : '可用'}</span></td>
+	                    <td class="text-muted">${c.used_email || '-'}</td>
+	                    <td class="text-muted">${c.used_username || '-'}</td>
+	                    <td class="text-muted">${formatTime(c.created_at)}</td>
+	                    <td>${!c.used ? `<button class="btn btn-danger btn-sm" onclick="deleteCode(${c.id})">删除</button>` : '-'}</td>
+	                </tr>
+	            `).join('');
+	            bindCodeSelectionEvents();
+	        }
 
         function formatTime(t) {
             if (!t) return '-';
             return new Date(t).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
         }
 
-        async function generateCodes() {
-            const count = parseInt(document.getElementById('codeCount').value) || 1;
-            const teamAccountId = document.getElementById('codeTeamAccount').value || null;
-            const { ok, data } = await api('/admin/codes', {
-                method: 'POST',
-                body: JSON.stringify({ count, teamAccountId: teamAccountId ? parseInt(teamAccountId) : null })
-            });
-            if (ok) {
-                alert(`已生成 ${data.created} 个邀请码:\n\n${data.codes.join('\n')}`);
-                loadCodes();
-                loadStats();
-            }
-        }
+	        async function generateCodes() {
+	            const count = parseInt(document.getElementById('codeCount').value) || 1;
+	            const teamAccountId = document.getElementById('codeTeamAccount').value || null;
+	            const { ok, data } = await api('/admin/codes', {
+	                method: 'POST',
+	                body: JSON.stringify({ count, teamAccountId: teamAccountId ? parseInt(teamAccountId) : null })
+	            });
+	            if (ok) {
+	                showGeneratedCodes(data.codes || []);
+	                await loadCodes();
+	                await loadStats();
+	            }
+	        }
 
         async function deleteCode(id) {
             if (!confirm('确定删除此邀请码？')) return;
