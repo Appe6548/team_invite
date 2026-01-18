@@ -154,7 +154,7 @@
         .btn-success { background: var(--success); color: #fff; }
         .btn-sm { padding: 0.25rem 0.5rem; font-size: 0.8rem; }
         
-        input, select {
+        input, select, textarea {
             padding: 0.4rem 0.6rem;
             border: 1px solid var(--border);
             border-radius: 6px;
@@ -162,7 +162,8 @@
             background: var(--input-bg);
             color: var(--text);
         }
-        input:focus, select:focus {
+        textarea { width: 100%; resize: vertical; min-height: 110px; }
+        input:focus, select:focus, textarea:focus {
             outline: none;
             border-color: var(--primary);
         }
@@ -189,6 +190,7 @@
         
         .hidden { display: none !important; }
         .text-muted { color: var(--muted); }
+        .text-danger { color: var(--danger); }
         .empty-state { text-align: center; padding: 2rem; color: var(--muted); }
         
         /* 编辑表单 */
@@ -469,6 +471,145 @@
                 ).join('');
         }
 
+        function setAccountSessionStatus(message, isError = false) {
+            const el = document.getElementById('accSessionStatus');
+            if (!el) return;
+            el.textContent = message || '';
+            el.className = isError ? 'text-danger' : 'text-muted';
+        }
+
+        function normalizeBearerToken(token) {
+            const t = (token || '').trim();
+            if (!t) return '';
+            return /^bearer\\s+/i.test(t) ? t : `Bearer ${t}`;
+        }
+
+        function looksLikeUuid(value) {
+            const s = (value || '').trim();
+            return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s);
+        }
+
+        function tryParsePossiblyDoubleEncodedJson(text) {
+            const tryParse = (s) => {
+                try { return { ok: true, value: JSON.parse(s) }; } catch { return { ok: false }; }
+            };
+            let current = text;
+            for (let i = 0; i < 3; i++) {
+                const parsed = tryParse(current);
+                if (!parsed.ok) return { ok: false };
+                if (typeof parsed.value === 'string') {
+                    current = parsed.value;
+                    continue;
+                }
+                return { ok: true, value: parsed.value };
+            }
+            return { ok: false };
+        }
+
+        function deepFindFirstString(obj, keys) {
+            const visited = new Set();
+            const stack = [obj];
+            while (stack.length) {
+                const cur = stack.pop();
+                if (!cur || typeof cur !== 'object') continue;
+                if (visited.has(cur)) continue;
+                visited.add(cur);
+                for (const k of keys) {
+                    if (Object.prototype.hasOwnProperty.call(cur, k) && typeof cur[k] === 'string' && cur[k].trim()) {
+                        return cur[k].trim();
+                    }
+                }
+                for (const v of Object.values(cur)) {
+                    if (v && typeof v === 'object') stack.push(v);
+                }
+            }
+            return '';
+        }
+
+        function extractCredentialsFromSessionText(rawText) {
+            const raw = (rawText || '').trim();
+            if (!raw) return { ok: false, error: '' };
+
+            const parsed = tryParsePossiblyDoubleEncodedJson(raw) ||
+                { ok: false };
+            let obj = parsed.ok ? parsed.value : null;
+
+            if (!obj) {
+                const start = raw.indexOf('{');
+                const end = raw.lastIndexOf('}');
+                if (start !== -1 && end !== -1 && end > start) {
+                    const sliced = raw.slice(start, end + 1);
+                    const slicedParsed = tryParsePossiblyDoubleEncodedJson(sliced);
+                    if (slicedParsed.ok) obj = slicedParsed.value;
+                }
+            }
+
+            if (!obj || typeof obj !== 'object') {
+                // 允许只粘贴 accessToken 本体
+                if (raw.split('.').length >= 3 && raw.length > 80) {
+                    return { ok: true, accessToken: raw, accountId: '' };
+                }
+                return { ok: false, error: '无法解析 Session JSON（请粘贴完整 JSON）' };
+            }
+
+            let accessToken =
+                deepFindFirstString(obj, ['accessToken', 'access_token']) ||
+                '';
+            let accountId = '';
+            if (obj.account && typeof obj.account === 'object' && typeof obj.account.id === 'string') {
+                accountId = obj.account.id.trim();
+            }
+            if (!accountId) {
+                accountId = deepFindFirstString(obj, ['accountId', 'account_id', 'chatgptAccountId', 'chatgpt_account_id', 'chatgpt-account-id']);
+            }
+
+            if (!accessToken && !accountId) {
+                return { ok: false, error: '未找到 accessToken / account.id（请确认复制的是 Session JSON）' };
+            }
+            return { ok: true, accessToken, accountId };
+        }
+
+        function tryFillAccountCredentialsFromSessionJson({ silent } = {}) {
+            const sessionEl = document.getElementById('accSessionJson');
+            if (!sessionEl) return false;
+            const raw = sessionEl.value || '';
+            if (!raw.trim()) {
+                if (!silent) setAccountSessionStatus('');
+                return false;
+            }
+
+            const { ok, accessToken, accountId, error } = extractCredentialsFromSessionText(raw);
+            if (!ok) {
+                if (!silent && error) setAccountSessionStatus(error, true);
+                return false;
+            }
+
+            const tokenEl = document.getElementById('accToken');
+            const accountEl = document.getElementById('accAccountId');
+            if (tokenEl && accessToken) tokenEl.value = normalizeBearerToken(accessToken);
+            if (accountEl && accountId) accountEl.value = accountId;
+
+            if (!silent) {
+                const parts = [];
+                if (accountId) parts.push(`Account ID: ${accountId}${looksLikeUuid(accountId) ? '' : '（请确认）'}`);
+                if (accessToken) parts.push('Token: 已填充');
+                setAccountSessionStatus(parts.length ? `已识别 ${parts.join('，')}` : '');
+            }
+            return true;
+        }
+
+        function bindAccountSessionJsonAutoParse() {
+            const sessionEl = document.getElementById('accSessionJson');
+            if (!sessionEl) return;
+            let timer = null;
+            const run = () => tryFillAccountCredentialsFromSessionJson();
+            sessionEl.addEventListener('input', () => {
+                clearTimeout(timer);
+                timer = setTimeout(run, 150);
+            });
+            sessionEl.addEventListener('blur', run);
+        }
+
         function showAddAccount() {
             const form = document.getElementById('accountForm');
             form.classList.remove('hidden');
@@ -479,16 +620,27 @@
                     <label><span>最大席位</span><input type="number" id="accMaxSeats" value="5" min="1"></label>
                 </div>
                 <div class="form-row">
-                    <label><span>Authorization Token</span><input type="text" id="accToken" placeholder="Bearer token"></label>
+                    <label style="flex: 1; min-width: 260px;">
+                        <span>Session JSON（从浏览器复制）</span>
+                        <textarea id="accSessionJson" placeholder='{"user":{...},"accessToken":"...","account":{"id":"..."}}'></textarea>
+                        <div id="accSessionStatus" class="text-muted" style="margin-top:0.25rem;"></div>
+                    </label>
                 </div>
-                <div class="form-row">
-                    <label><span>Account ID</span><input type="text" id="accAccountId" placeholder="Account ID"></label>
-                </div>
+                <details style="margin-top:0.25rem;">
+                    <summary class="text-muted" style="cursor:pointer;">高级：手动填写 Token / Account ID</summary>
+                    <div class="form-row" style="margin-top:0.75rem;">
+                        <label><span>Authorization Token</span><input type="text" id="accToken" placeholder="Bearer token"></label>
+                    </div>
+                    <div class="form-row">
+                        <label><span>Account ID</span><input type="text" id="accAccountId" placeholder="Account ID"></label>
+                    </div>
+                </details>
                 <div class="form-actions">
                     <button class="btn btn-ghost" onclick="hideAccountForm()">取消</button>
                     <button class="btn btn-primary" onclick="saveAccount()">保存</button>
                 </div>
             `;
+            bindAccountSessionJsonAutoParse();
         }
 
         function editAccount(id) {
@@ -496,6 +648,7 @@
             if (!acc) return;
             const form = document.getElementById('accountForm');
             form.classList.remove('hidden');
+            const hasCreds = Boolean((acc.authorizationToken || '').trim() || (acc.accountId || '').trim());
             form.innerHTML = `
                 <h3>编辑车账号</h3>
                 <input type="hidden" id="accId" value="${acc.id}">
@@ -510,17 +663,28 @@
                     </label>
                 </div>
                 <div class="form-row">
-                    <label><span>Authorization Token</span><input type="text" id="accToken" value="${acc.authorizationToken || ''}" placeholder="Bearer token"></label>
+                    <label style="flex: 1; min-width: 260px;">
+                        <span>Session JSON（从浏览器复制）</span>
+                        <textarea id="accSessionJson" placeholder='{"user":{...},"accessToken":"...","account":{"id":"..."}}'></textarea>
+                        <div id="accSessionStatus" class="text-muted" style="margin-top:0.25rem;"></div>
+                    </label>
                 </div>
-                <div class="form-row">
-                    <label><span>Account ID</span><input type="text" id="accAccountId" value="${acc.accountId || ''}" placeholder="Team/Account ID"></label>
-                </div>
+                <details style="margin-top:0.25rem;" ${hasCreds ? 'open' : ''}>
+                    <summary class="text-muted" style="cursor:pointer;">高级：手动填写 Token / Account ID</summary>
+                    <div class="form-row" style="margin-top:0.75rem;">
+                        <label><span>Authorization Token</span><input type="text" id="accToken" value="${acc.authorizationToken || ''}" placeholder="Bearer token"></label>
+                    </div>
+                    <div class="form-row">
+                        <label><span>Account ID</span><input type="text" id="accAccountId" value="${acc.accountId || ''}" placeholder="Team/Account ID"></label>
+                    </div>
+                </details>
                 <div class="form-actions">
                     <button class="btn btn-ghost" onclick="hideAccountForm()">取消</button>
                     <button class="btn btn-success" onclick="syncAccount(${acc.id})">同步状态</button>
                     <button class="btn btn-primary" onclick="saveAccount()">保存</button>
                 </div>
             `;
+            bindAccountSessionJsonAutoParse();
         }
 
         function hideAccountForm() {
@@ -532,6 +696,7 @@
             const name = document.getElementById('accName').value.trim();
             const maxSeats = parseInt(document.getElementById('accMaxSeats').value) || 5;
             const enabled = document.getElementById('accEnabled')?.value !== '0';
+            tryFillAccountCredentialsFromSessionJson({ silent: true });
             const authorizationToken = document.getElementById('accToken')?.value.trim() || '';
             const accountId = document.getElementById('accAccountId')?.value.trim() || '';
 
