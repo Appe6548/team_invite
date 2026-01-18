@@ -691,16 +691,23 @@
             document.getElementById('accountForm').classList.add('hidden');
         }
 
-        async function saveAccount() {
-            const id = document.getElementById('accId')?.value;
-            const name = document.getElementById('accName').value.trim();
-            const maxSeats = parseInt(document.getElementById('accMaxSeats').value) || 5;
-            const enabled = document.getElementById('accEnabled')?.value !== '0';
-            tryFillAccountCredentialsFromSessionJson({ silent: true });
-            const authorizationToken = document.getElementById('accToken')?.value.trim() || '';
-            const accountId = document.getElementById('accAccountId')?.value.trim() || '';
+	        async function saveAccount() {
+	            const id = document.getElementById('accId')?.value;
+	            const name = document.getElementById('accName').value.trim();
+	            const maxSeats = parseInt(document.getElementById('accMaxSeats').value) || 5;
+	            const enabled = document.getElementById('accEnabled')?.value !== '0';
+	            const sessionText = (document.getElementById('accSessionJson')?.value || '').trim();
+	            if (sessionText) {
+	                const ok = tryFillAccountCredentialsFromSessionJson({ silent: false });
+	                if (!ok) {
+	                    alert('Session JSON 解析失败，请检查复制内容');
+	                    return;
+	                }
+	            }
+	            const authorizationToken = document.getElementById('accToken')?.value.trim() || '';
+	            const accountId = document.getElementById('accAccountId')?.value.trim() || '';
 
-            if (!name) { alert('请输入名称'); return; }
+	            if (!name) { alert('请输入名称'); return; }
 
             let res;
             if (id) {
