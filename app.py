@@ -628,16 +628,8 @@ def sync_all_team_accounts():
 @admin_required
 def delete_team_account(account_id):
     conn = get_db()
-    # 检查是否有关联的邀请码
-    count = conn.execute(
-        'SELECT COUNT(*) FROM invite_codes WHERE team_account_id = ?', 
-        (account_id,)
-    ).fetchone()[0]
-    
-    if count > 0:
-        conn.close()
-        return jsonify({'error': '该车位下有邀请码，无法删除'}), 400
-    
+    # 允许删除车账号：将其名下邀请码解除绑定，避免产生无法使用的“锁定邀请码”
+    conn.execute('UPDATE invite_codes SET team_account_id = NULL WHERE team_account_id = ?', (account_id,))
     conn.execute('DELETE FROM team_accounts WHERE id = ?', (account_id,))
     conn.commit()
     conn.close()
