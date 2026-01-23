@@ -127,6 +127,10 @@
         .badge.used { background: #fee2e2; color: #991b1b; }
         .badge.enabled { background: #dbeafe; color: #1e40af; }
         .badge.disabled { background: #f3f4f6; color: #6b7280; }
+        .badge.valid { background: #dcfce7; color: #166534; }
+        .badge.invalid { background: #fee2e2; color: #991b1b; }
+        .badge.unknown { background: #f3f4f6; color: #6b7280; }
+        .badge.missing { background: #f3f4f6; color: #6b7280; }
         
         .code {
             font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -247,13 +251,13 @@
                 <div class="stats-grid" id="accountStats"></div>
                 
                 <div class="table-container">
-                    <div class="table-header">
-                        <span class="title">车账号列表</span>
-                        <div class="table-actions">
-                            <button class="btn btn-primary" onclick="showAddAccount()">+ 添加车账号</button>
-                            <button class="btn btn-ghost" onclick="syncAllAccounts()">同步</button>
-                        </div>
-                    </div>
+	                    <div class="table-header">
+	                        <span class="title">车账号列表 <span class="text-muted" style="font-weight:400;">（自动同步：每 3 小时）</span></span>
+	                        <div class="table-actions">
+	                            <button class="btn btn-primary" onclick="showAddAccount()">+ 添加车账号</button>
+	                            <button class="btn btn-ghost" onclick="syncAllAccounts()">同步</button>
+	                        </div>
+	                    </div>
                     <table>
                         <thead>
                             <tr>
@@ -451,22 +455,28 @@
                 tbody.innerHTML = '<tr><td colspan="6" class="empty-state">暂无车账号</td></tr>';
                 return;
             }
-	            tbody.innerHTML = accounts.map(acc => `
-	                <tr>
-	                    <td>
-	                        <div><strong>${acc.name}</strong></div>
-	                        ${acc.accountEmail ? `<div class="text-muted" style="margin-top:0.25rem;">${acc.accountEmail}</div>` : ''}
-	                    </td>
-	                    <td>${acc.seatsInUse} / ${acc.seatsEntitled}</td>
-	                    <td>${acc.pendingInvites}</td>
-	                    <td class="text-muted">${acc.lastSync ? formatTime(acc.lastSync) : '-'}</td>
-	                    <td><span class="badge ${acc.enabled ? 'enabled' : 'disabled'}">${acc.enabled ? '启用' : '禁用'}</span></td>
-	                    <td>
-	                        <button class="btn btn-ghost btn-sm" onclick="editAccount(${acc.id})">编辑</button>
-	                        <button class="btn btn-danger btn-sm" onclick="deleteAccount(${acc.id})">删除</button>
-	                    </td>
-	                </tr>
-	            `).join('');
+		            tbody.innerHTML = accounts.map(acc => {
+                        const auth = (acc.authStatus || 'unknown').toLowerCase();
+                        const authLabel = auth === 'valid' ? '有效' : auth === 'invalid' ? '失效' : auth === 'missing' ? '未配置' : '未验证';
+                        const authCls = auth === 'valid' ? 'valid' : auth === 'invalid' ? 'invalid' : auth === 'missing' ? 'missing' : 'unknown';
+                        return `
+		                <tr>
+		                    <td>
+		                        <div><strong>${acc.name}</strong> <span class="badge ${authCls}">${authLabel}</span></div>
+		                        ${acc.accountEmail ? `<div class="text-muted" style="margin-top:0.25rem;">${acc.accountEmail}</div>` : ''}
+                                ${acc.authCheckedAt ? `<div class="text-muted" style="margin-top:0.25rem;">验证：${formatTime(acc.authCheckedAt)}</div>` : ''}
+		                    </td>
+		                    <td>${acc.seatsInUse} / ${acc.seatsEntitled}</td>
+		                    <td>${acc.pendingInvites}</td>
+		                    <td class="text-muted">${acc.lastSync ? formatTime(acc.lastSync) : '-'}</td>
+		                    <td><span class="badge ${acc.enabled ? 'enabled' : 'disabled'}">${acc.enabled ? '启用' : '禁用'}</span></td>
+		                    <td>
+		                        <button class="btn btn-ghost btn-sm" onclick="editAccount(${acc.id})">编辑</button>
+		                        <button class="btn btn-danger btn-sm" onclick="deleteAccount(${acc.id})">删除</button>
+		                    </td>
+		                </tr>
+		            `;
+                    }).join('');
             
             // 更新邀请码生成的下拉框
             updateCodeTeamSelect();
@@ -476,7 +486,7 @@
             const select = document.getElementById('codeTeamAccount');
             select.innerHTML = '<option value="">不绑定车位</option>' + 
                 accounts.filter(a => a.enabled).map(a => 
-                    `<option value="${a.id}">${a.name}</option>`
+                    `<option value="${a.id}">${a.name}${a.authStatus && a.authStatus !== 'valid' ? '（' + (a.authStatus==='invalid'?'失效':a.authStatus==='missing'?'未配置':'未验证') + '）' : ''}</option>`
                 ).join('');
         }
 

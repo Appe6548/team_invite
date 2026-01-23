@@ -18,8 +18,8 @@ import requests
 
 load_dotenv()
 
-# 同步间隔（秒）
-SYNC_INTERVAL = int(os.environ.get('SYNC_INTERVAL', 30))
+# 同步间隔（秒）- 默认每 3 小时自动同步一次
+SYNC_INTERVAL = int(os.environ.get('SYNC_INTERVAL', 60 * 60 * 3))
 
 # JWT 配置
 JWT_SECRET = os.environ.get('JWT_SECRET', secrets.token_hex(32))
@@ -32,6 +32,35 @@ STATIC_DIR = os.path.join(BASE_DIR, 'static')
 app = Flask(__name__, static_folder=STATIC_DIR, static_url_path='')
 
 # ========== ChatGPT Team API ==========
+
+def _truncate_text(value: str, limit: int = 1200) -> str:
+    if not value:
+        return ""
+    s = str(value)
+    return s if len(s) <= limit else s[:limit] + "…"
+
+def _extract_chatgpt_error(resp: requests.Response | None) -> str:
+    if not resp:
+        return ""
+    try:
+        if "application/json" in (resp.headers.get("content-type") or ""):
+            data = resp.json()
+            if isinstance(data, dict):
+                err = data.get("error")
+                if isinstance(err, dict):
+                    code = (err.get("code") or "").strip()
+                    message = (err.get("message") or "").strip()
+                    parts = [p for p in [code, message] if p]
+                    if parts:
+                        return _truncate_text(" - ".join(parts))
+    except Exception:
+        pass
+    return _truncate_text(resp.text)
+
+def _is_invalid_auth_response(resp: requests.Response | None) -> bool:
+    if not resp:
+        return False
+    return resp.status_code in (401, 403)
 
 def build_chatgpt_headers(account_id: str, auth_token: str) -> dict:
     """构建 ChatGPT API 请求头"""
@@ -46,15 +75,28 @@ def build_chatgpt_headers(account_id: str, auth_token: str) -> dict:
 
 def sync_single_account(db_account_id: int, auth_token: str, chatgpt_account_id: str):
     """同步单个车账号状态到数据库"""
-    data = fetch_team_status(chatgpt_account_id, auth_token)
     conn = get_db()
-    conn.execute('''
-        UPDATE team_accounts SET seats_in_use = ?, seats_entitled = ?, pending_invites = ?, active_until = ?, last_sync = datetime('now')
-        WHERE id = ?
-    ''', (data['seats_in_use'], data['seats_entitled'], data['pending_invites'], data.get('active_until'), db_account_id))
-    conn.commit()
-    conn.close()
-    return data
+    try:
+        data = fetch_team_status(chatgpt_account_id, auth_token)
+        conn.execute('''
+            UPDATE team_accounts
+            SET seats_in_use = ?, seats_entitled = ?, pending_invites = ?, active_until = ?, last_sync = datetime('now'),
+                auth_status = 'valid', auth_checked_at = datetime('now'), auth_error = NULL
+            WHERE id = ?
+        ''', (data['seats_in_use'], data['seats_entitled'], data['pending_invites'], data.get('active_until'), db_account_id))
+        conn.commit()
+        return data
+    except requests.HTTPError as e:
+        if _is_invalid_auth_response(getattr(e, "response", None)):
+            conn.execute('''
+                UPDATE team_accounts
+                SET auth_status = 'invalid', auth_checked_at = datetime('now'), auth_error = ?
+                WHERE id = ?
+            ''', (_extract_chatgpt_error(getattr(e, "response", None)), db_account_id))
+            conn.commit()
+        raise
+    finally:
+        conn.close()
 
 def fetch_team_status(account_id: str, auth_token: str) -> dict:
     """获取 ChatGPT Team 状态"""
@@ -185,6 +227,13 @@ def init_db():
             created_at TEXT DEFAULT (datetime('now')),
             updated_at TEXT DEFAULT (datetime('now'))
         );
+
+        CREATE TABLE IF NOT EXISTS cron_locks (
+            name TEXT PRIMARY KEY,
+            locked_until INTEGER DEFAULT 0,
+            owner TEXT DEFAULT '',
+            updated_at INTEGER DEFAULT 0
+        );
     ''')
     # 添加 active_until 列（如果不存在）
     try:
@@ -206,11 +255,46 @@ def init_db():
         conn.execute('ALTER TABLE team_accounts ADD COLUMN account_email TEXT')
     except sqlite3.OperationalError:
         pass  # 列已存在
+    # 添加 auth_status 列（如果不存在）
+    try:
+        conn.execute('ALTER TABLE team_accounts ADD COLUMN auth_status TEXT')
+    except sqlite3.OperationalError:
+        pass  # 列已存在
+    # 添加 auth_checked_at 列（如果不存在）
+    try:
+        conn.execute('ALTER TABLE team_accounts ADD COLUMN auth_checked_at TEXT')
+    except sqlite3.OperationalError:
+        pass  # 列已存在
+    # 添加 auth_error 列（如果不存在）
+    try:
+        conn.execute('ALTER TABLE team_accounts ADD COLUMN auth_error TEXT')
+    except sqlite3.OperationalError:
+        pass  # 列已存在
     conn.commit()
     conn.close()
 
 def generate_code():
     return secrets.token_urlsafe(8).upper()[:12]
+
+def _try_acquire_cron_lock(name: str, ttl_seconds: int) -> bool:
+    """跨进程后台任务锁（避免多 worker 重复跑）。"""
+    now = int(time.time())
+    locked_until = now + max(int(ttl_seconds), 1)
+    owner = f"{os.getpid()}:{threading.get_ident()}"
+    conn = get_db()
+    try:
+        conn.execute(
+            "INSERT OR IGNORE INTO cron_locks (name, locked_until, owner, updated_at) VALUES (?, 0, '', 0)",
+            (name,),
+        )
+        cur = conn.execute(
+            "UPDATE cron_locks SET locked_until = ?, owner = ?, updated_at = ? WHERE name = ? AND locked_until <= ?",
+            (locked_until, owner, now, name, now),
+        )
+        conn.commit()
+        return cur.rowcount == 1
+    finally:
+        conn.close()
 
 def admin_required(f):
     @wraps(f)
@@ -282,7 +366,11 @@ def team_accounts_status():
     conn = get_db()
     accounts = conn.execute('''
         SELECT id, name, max_seats, seats_entitled, seats_in_use, pending_invites, enabled, active_until, last_sync, created_at
-        FROM team_accounts WHERE enabled = 1
+        FROM team_accounts
+        WHERE enabled = 1
+          AND authorization_token IS NOT NULL AND TRIM(authorization_token) != ''
+          AND account_id IS NOT NULL AND TRIM(account_id) != ''
+          AND (auth_status IS NULL OR TRIM(auth_status) = '' OR TRIM(auth_status) != 'invalid')
         ORDER BY id ASC
     ''').fetchall()
     
@@ -375,6 +463,15 @@ def use_invite():
         result = send_team_invite(account['account_id'], account['authorization_token'], email)
         
         if not result['ok']:
+            if result.get('status') in (401, 403):
+                conn.execute('''
+                    UPDATE team_accounts
+                    SET auth_status = 'invalid', auth_checked_at = datetime('now'), auth_error = ?
+                    WHERE id = ?
+                ''', (_truncate_text(result.get('body') or ''), final_team_id))
+                conn.commit()
+                conn.close()
+                return jsonify({'error': '车位暂不可用，请联系管理员'}), 400
             conn.close()
             return jsonify({'error': f'发送邀请失败: {result["body"]}'}), 400
         
@@ -386,6 +483,11 @@ def use_invite():
         ''', (email, final_team_id, user_id, code))
         # 标记用户已使用邀请
         conn.execute('UPDATE users SET has_used = 1 WHERE id = ?', (user_id,))
+        conn.execute('''
+            UPDATE team_accounts
+            SET auth_status = 'valid', auth_checked_at = datetime('now'), auth_error = NULL
+            WHERE id = ?
+        ''', (final_team_id,))
         conn.commit()
         conn.close()
         
@@ -474,12 +576,19 @@ def stats():
 def list_team_accounts():
     conn = get_db()
     accounts = conn.execute('''
-        SELECT id, name, authorization_token, account_id, account_email, max_seats, seats_entitled, seats_in_use, pending_invites, enabled, active_until, last_sync, created_at
+        SELECT id, name, authorization_token, account_id, account_email, max_seats, seats_entitled, seats_in_use, pending_invites,
+               enabled, active_until, last_sync, created_at, auth_status, auth_checked_at, auth_error
         FROM team_accounts ORDER BY id ASC
     ''').fetchall()
     
     result = []
     for acc in accounts:
+        auth_status = (acc['auth_status'] or '').strip() or None
+        if not auth_status:
+            if not acc['authorization_token'] or not acc['account_id']:
+                auth_status = 'missing'
+            else:
+                auth_status = 'unknown'
         result.append({
             'id': acc['id'],
             'name': acc['name'],
@@ -493,6 +602,9 @@ def list_team_accounts():
             'seatsEntitled': acc['seats_entitled'],
             'activeUntil': acc['active_until'],
             'lastSync': acc['last_sync'],
+            'authStatus': auth_status,
+            'authCheckedAt': acc['auth_checked_at'],
+            'authError': acc['auth_error'],
             'createdAt': acc['created_at']
         })
     
@@ -519,6 +631,11 @@ def create_team_account():
         (name, authorization_token, account_id, account_email, max_seats, max_seats, active_until)
     )
     new_id = cursor.lastrowid
+    if not authorization_token or not account_id:
+        conn.execute(
+            "UPDATE team_accounts SET auth_status = 'missing', auth_checked_at = datetime('now'), auth_error = '未配置凭证' WHERE id = ?",
+            (new_id,),
+        )
     conn.commit()
     conn.close()
     
@@ -542,13 +659,33 @@ def update_team_account(account_id):
     active_until = (data.get('activeUntil') or '').strip() or None
     
     conn = get_db()
+    old = conn.execute(
+        "SELECT authorization_token, account_id FROM team_accounts WHERE id = ?",
+        (account_id,),
+    ).fetchone()
+    creds_changed = False
+    if old:
+        creds_changed = ((old["authorization_token"] or "").strip() != authorization_token) or ((old["account_id"] or "").strip() != acc_id)
     conn.execute('''
         UPDATE team_accounts SET name = ?, authorization_token = ?, account_id = ?, account_email = ?, max_seats = ?, enabled = ?, active_until = ?
         WHERE id = ?
     ''', (name, authorization_token, acc_id, account_email, max_seats, enabled, active_until, account_id))
+    if creds_changed:
+        if authorization_token and acc_id:
+            conn.execute(
+                "UPDATE team_accounts SET auth_status = NULL, auth_checked_at = NULL, auth_error = NULL WHERE id = ?",
+                (account_id,),
+            )
+        else:
+            conn.execute(
+                "UPDATE team_accounts SET auth_status = 'missing', auth_checked_at = datetime('now'), auth_error = '未配置凭证' WHERE id = ?",
+                (account_id,),
+            )
     conn.commit()
     conn.close()
     
+    if creds_changed and authorization_token and acc_id:
+        threading.Thread(target=lambda: sync_single_account(account_id, authorization_token, acc_id), daemon=True).start()
     return jsonify({'status': 'ok'})
 
 @app.route('/api/admin/team-accounts/<int:account_id>/sync', methods=['POST'])
@@ -566,14 +703,8 @@ def sync_team_account(account_id):
         return jsonify({'error': '请先配置 Authorization Token 和 Account ID'}), 400
     
     try:
-        data = fetch_team_status(acc['account_id'], acc['authorization_token'])
-        
-        conn.execute('''
-            UPDATE team_accounts SET seats_in_use = ?, seats_entitled = ?, pending_invites = ?, active_until = ?, last_sync = datetime('now')
-            WHERE id = ?
-        ''', (data['seats_in_use'], data['seats_entitled'], data.get('pending_invites', 0), data.get('active_until'), account_id))
-        conn.commit()
         conn.close()
+        data = sync_single_account(account_id, acc['authorization_token'], acc['account_id'])
         
         return jsonify({
             'status': 'ok',
@@ -583,10 +714,9 @@ def sync_team_account(account_id):
             'activeUntil': data.get('active_until')
         })
     except requests.HTTPError as e:
-        conn.close()
-        return jsonify({'error': f'API 请求失败: {e.response.status_code if e.response else str(e)}'}), 400
+        resp = getattr(e, "response", None)
+        return jsonify({'error': f'API 请求失败: {resp.status_code if resp else str(e)}'}), 400
     except Exception as e:
-        conn.close()
         return jsonify({'error': f'同步失败: {str(e)}'}), 500
 
 @app.route('/api/admin/team-accounts/sync-all', methods=['POST'])
@@ -595,6 +725,7 @@ def sync_all_team_accounts():
     """同步所有车账号状态"""
     conn = get_db()
     accounts = conn.execute('SELECT * FROM team_accounts WHERE enabled = 1').fetchall()
+    conn.close()
     
     results = []
     for acc in accounts:
@@ -603,12 +734,7 @@ def sync_all_team_accounts():
             continue
         
         try:
-            data = fetch_team_status(acc['account_id'], acc['authorization_token'])
-            
-            conn.execute('''
-                UPDATE team_accounts SET seats_in_use = ?, seats_entitled = ?, pending_invites = ?, active_until = ?, last_sync = datetime('now')
-                WHERE id = ?
-            ''', (data['seats_in_use'], data['seats_entitled'], data.get('pending_invites', 0), data.get('active_until'), acc['id']))
+            data = sync_single_account(acc['id'], acc['authorization_token'], acc['account_id'])
             
             results.append({
                 'id': acc['id'], 
@@ -619,9 +745,7 @@ def sync_all_team_accounts():
             })
         except Exception as e:
             results.append({'id': acc['id'], 'name': acc['name'], 'error': str(e)})
-    
-    conn.commit()
-    conn.close()
+
     return jsonify({'results': results})
 
 @app.route('/api/admin/team-accounts/<int:account_id>', methods=['DELETE'])
@@ -731,38 +855,67 @@ def delete_user(user_id):
 
 def background_sync():
     """后台线程：定时同步所有车账号状态"""
+    initial_delay = int(os.environ.get("SYNC_INITIAL_DELAY", 5))
+    time.sleep(max(initial_delay, 0))
+    lock_name = os.environ.get("SYNC_LOCK_NAME", "team_accounts_sync")
+    lock_ttl = int(os.environ.get("SYNC_LOCK_TTL", max(60, SYNC_INTERVAL - 30)))
     while True:
-        time.sleep(SYNC_INTERVAL)
         try:
-            conn = sqlite3.connect(DB_PATH)
-            conn.row_factory = sqlite3.Row
+            if not _try_acquire_cron_lock(lock_name, lock_ttl):
+                time.sleep(min(60, SYNC_INTERVAL))
+                continue
+
+            conn = get_db()
             accounts = conn.execute(
-                'SELECT * FROM team_accounts WHERE enabled = 1 AND authorization_token IS NOT NULL AND account_id IS NOT NULL'
+                'SELECT id, name, authorization_token, account_id, enabled FROM team_accounts WHERE enabled = 1'
             ).fetchall()
-            
+            conn.close()
+
             for acc in accounts:
+                if not acc['authorization_token'] or not acc['account_id']:
+                    conn2 = get_db()
+                    conn2.execute(
+                        "UPDATE team_accounts SET auth_status = 'missing', auth_checked_at = datetime('now'), auth_error = '未配置凭证' WHERE id = ?",
+                        (acc['id'],),
+                    )
+                    conn2.commit()
+                    conn2.close()
+                    continue
                 try:
-                    data = fetch_team_status(acc['account_id'], acc['authorization_token'])
-                    conn.execute('''
-                        UPDATE team_accounts SET seats_in_use = ?, seats_entitled = ?, pending_invites = ?, active_until = ?, last_sync = datetime('now')
-                        WHERE id = ?
-                    ''', (data['seats_in_use'], data['seats_entitled'], data.get('pending_invites', 0), data.get('active_until'), acc['id']))
+                    sync_single_account(acc['id'], acc['authorization_token'], acc['account_id'])
                 except Exception as e:
                     print(f"[同步失败] {acc['name']}: {e}")
-            
-            conn.commit()
-            conn.close()
         except Exception as e:
             print(f"[后台同步错误] {e}")
+        time.sleep(SYNC_INTERVAL)
+
+_background_sync_started = False
+_background_sync_lock = threading.Lock()
+
+def _ensure_background_sync_started():
+    global _background_sync_started
+    if _background_sync_started:
+        return
+    with _background_sync_lock:
+        if _background_sync_started:
+            return
+        sync_thread = threading.Thread(target=background_sync, daemon=True)
+        sync_thread.start()
+        _background_sync_started = True
+
+@app.before_request
+def _start_background_sync_if_needed():
+    _ensure_background_sync_started()
 
 # 确保在 WSGI 模式（如 gunicorn）下也会初始化数据库结构
 init_db()
 
 if __name__ == '__main__':
-    # 启动后台同步线程
-    sync_thread = threading.Thread(target=background_sync, daemon=True)
-    sync_thread.start()
-    print(f"✅ 后台同步已启动，每 {SYNC_INTERVAL} 秒更新一次")
+    _ensure_background_sync_started()
+    if SYNC_INTERVAL % 3600 == 0:
+        print(f"✅ 后台同步已启动，每 {SYNC_INTERVAL // 3600} 小时更新一次")
+    else:
+        print(f"✅ 后台同步已启动，每 {SYNC_INTERVAL} 秒更新一次")
     
     port = int(os.environ.get('PORT', 5000))
     debug = os.environ.get('DEBUG', 'false').lower() == 'true'
