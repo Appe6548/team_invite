@@ -342,20 +342,16 @@
             const ui = document.getElementById('userInfo');
             ui.innerHTML = `<span>${currentUser.username}</span><a href="#" onclick="logout();return false" class="navbar-link">重置身份</a>`;
             ui.classList.remove('hidden');
-            
-            // 如果用户已使用过邀请，隐藏邀请表单
-            if (currentUser.hasUsed) {
-                document.getElementById('inviteSection').classList.add('hidden');
-            } else {
-                document.getElementById('inviteSection').classList.remove('hidden');
-            }
+
+            document.getElementById('inviteSection').classList.remove('hidden');
         }
 
         function logout() { clearToken(); location.reload(); }
 
         async function loadTeamAccounts() {
             try {
-                teamAccounts = (await (await fetch('/api/team-accounts/status')).json()).accounts || [];
+                const all = (await (await fetch('/api/team-accounts/status')).json()).accounts || [];
+                teamAccounts = all.filter(a => (a.seatsEntitled - a.seatsInUse - a.pendingInvites) > 0);
                 renderTeamAccounts();
                 updateTeamSelect();
             } catch { document.getElementById('teamAccountsContainer').innerHTML = '<p class="muted" style="text-align:center">加载失败</p>'; }
@@ -366,7 +362,7 @@
             if (!teamAccounts.length) { c.innerHTML = '<p class="muted" style="text-align:center">暂无可用车位</p>'; return; }
             c.innerHTML = teamAccounts.map(a => {
                 const avail = a.seatsEntitled - a.seatsInUse - a.pendingInvites;
-                const full = a.seatsInUse + a.pendingInvites >= 5;
+                const full = avail <= 0;
                 const sel = selectedAccountId === a.id;
                 const exp = a.activeUntil ? new Date(a.activeUntil).toLocaleDateString() : '';
                 return `<div class="team-row ${sel?'selected':''} ${full?'full':''}" onclick="selectAccount(${a.id},${full})">
@@ -391,11 +387,12 @@
         function updateTeamSelect() {
             const s = document.getElementById('teamSelect');
             s.innerHTML = '<option value="">请选择车位</option>' + teamAccounts.map(a => {
-                const full = a.seatsInUse + a.pendingInvites >= 5;
+                const avail = a.seatsEntitled - a.seatsInUse - a.pendingInvites;
+                const full = avail <= 0;
                 return `<option value="${a.id}" ${full?'disabled':''}>${a.name} (${a.seatsInUse+a.pendingInvites}/${a.seatsEntitled})${full?' (不可选)':''}</option>`;
             }).join('');
             if (selectedAccountId) s.value = selectedAccountId;
-            else { const av = teamAccounts.find(a => a.seatsInUse + a.pendingInvites < 5); if (av) { selectedAccountId = av.id; s.value = av.id; } }
+            else { const av = teamAccounts.find(a => (a.seatsEntitled - a.seatsInUse - a.pendingInvites) > 0); if (av) { selectedAccountId = av.id; s.value = av.id; } }
         }
 
         async function checkInviteCode(code) {

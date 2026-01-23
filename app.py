@@ -371,6 +371,7 @@ def team_accounts_status():
           AND authorization_token IS NOT NULL AND TRIM(authorization_token) != ''
           AND account_id IS NOT NULL AND TRIM(account_id) != ''
           AND (auth_status IS NULL OR TRIM(auth_status) = '' OR TRIM(auth_status) != 'invalid')
+          AND (COALESCE(seats_entitled, 0) - COALESCE(seats_in_use, 0) - COALESCE(pending_invites, 0)) > 0
         ORDER BY id ASC
     ''').fetchall()
     
