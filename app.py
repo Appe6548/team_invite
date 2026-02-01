@@ -570,6 +570,97 @@ def stats():
     conn.close()
     return jsonify({'total': total, 'used': used, 'available': total - used})
 
+# ========== 管理员直邀 ==========
+
+@app.route('/api/admin/invite', methods=['POST'])
+@admin_required
+def admin_invite_member():
+    """管理员直接输入邮箱发送 Team 邀请（可选指定车账号）"""
+    data = request.json or {}
+    email = (data.get('email') or '').strip().lower()
+    team_account_id = data.get('teamAccountId')
+    if team_account_id is not None and team_account_id != '':
+        try:
+            team_account_id = int(team_account_id)
+        except (TypeError, ValueError):
+            return jsonify({'error': 'teamAccountId 无效'}), 400
+    else:
+        team_account_id = None
+
+    if not email or '@' not in email:
+        return jsonify({'error': '请输入有效邮箱'}), 400
+
+    conn = get_db()
+    try:
+        account = None
+        if team_account_id:
+            account = conn.execute(
+                'SELECT * FROM team_accounts WHERE id = ? AND enabled = 1',
+                (team_account_id,),
+            ).fetchone()
+            if not account:
+                return jsonify({'error': '车位不可用'}), 400
+        else:
+            account = conn.execute('''
+                SELECT *
+                FROM team_accounts
+                WHERE enabled = 1
+                  AND (authorization_token IS NOT NULL AND authorization_token <> '')
+                  AND (account_id IS NOT NULL AND account_id <> '')
+                  AND (COALESCE(seats_entitled, 0) - COALESCE(seats_in_use, 0) - COALESCE(pending_invites, 0)) > 0
+                  AND COALESCE(auth_status, '') <> 'invalid'
+                  AND COALESCE(auth_status, '') <> 'missing'
+                ORDER BY
+                  CASE WHEN COALESCE(auth_status, '') = 'valid' THEN 0 ELSE 1 END,
+                  (COALESCE(seats_entitled, 0) - COALESCE(seats_in_use, 0) - COALESCE(pending_invites, 0)) DESC,
+                  id ASC
+                LIMIT 1
+            ''').fetchone()
+            if not account:
+                return jsonify({'error': '暂无可用车位（请先添加/启用车账号并确保有空位）'}), 400
+
+        if not account['authorization_token'] or not account['account_id']:
+            return jsonify({'error': '车位未配置凭证，无法发送邀请'}), 400
+
+        remaining = (account['seats_entitled'] or 0) - (account['seats_in_use'] or 0) - (account['pending_invites'] or 0)
+        if remaining <= 0:
+            return jsonify({'error': '车位已满（含待处理邀请）'}), 400
+
+        result = send_team_invite(account['account_id'], account['authorization_token'], email)
+        if not result.get('ok'):
+            if result.get('status') in (401, 403):
+                conn.execute('''
+                    UPDATE team_accounts
+                    SET auth_status = 'invalid', auth_checked_at = datetime('now'), auth_error = ?
+                    WHERE id = ?
+                ''', (_truncate_text(result.get('body') or ''), account['id']))
+                conn.commit()
+                return jsonify({'error': '车位暂不可用，请先更新凭证或稍后重试'}), 400
+            return jsonify({'error': f'发送邀请失败: {_truncate_text(result.get("body") or "")}'}), 400
+
+        conn.execute('''
+            UPDATE team_accounts
+            SET auth_status = 'valid', auth_checked_at = datetime('now'), auth_error = NULL
+            WHERE id = ?
+        ''', (account['id'],))
+        conn.commit()
+
+        threading.Thread(
+            target=lambda: sync_single_account(account['id'], account['authorization_token'], account['account_id']),
+            daemon=True,
+        ).start()
+
+        return jsonify({
+            'status': 'ok',
+            'message': '邀请已发送，请查收邮件',
+            'email': email,
+            'teamAccount': {'id': account['id'], 'name': account['name']},
+        })
+    except Exception as e:
+        return jsonify({'error': f'发送邀请失败: {str(e)}'}), 500
+    finally:
+        conn.close()
+
 # ========== 车账号管理 ==========
 
 @app.route('/api/admin/team-accounts', methods=['GET'])

@@ -211,6 +211,56 @@
         .form-row label { display: flex; flex-direction: column; gap: 0.25rem; flex: 1; min-width: 150px; }
         .form-row label span { font-size: 0.85rem; color: var(--muted); }
         .form-actions { display: flex; gap: 0.5rem; justify-content: flex-end; margin-top: 1rem; }
+
+        .card-body { padding: 1rem; }
+
+        /* Modal（用于车账号表单，避免滚动到底部） */
+        .modal-overlay {
+            position: fixed;
+            inset: 0;
+            z-index: 1000;
+            background: rgba(15, 23, 42, 0.45);
+            border: none;
+            border-radius: 0;
+            margin: 0;
+            display: flex;
+            justify-content: center;
+            align-items: flex-start;
+            padding: 4rem 1rem 2rem;
+            overflow: auto;
+        }
+        [data-theme="dark"] .modal-overlay { background: rgba(0, 0, 0, 0.55); }
+        .modal-card {
+            width: min(820px, 100%);
+            background: var(--card);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            box-shadow: 0 18px 50px rgba(0, 0, 0, 0.18);
+        }
+        .modal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 0.75rem;
+            padding: 0.9rem 1rem;
+            border-bottom: 1px solid var(--border);
+            background: var(--table-bg);
+        }
+        .modal-header h3 { margin: 0; font-size: 1rem; }
+        .modal-content { padding: 1rem; }
+        .btn-icon {
+            width: 32px;
+            height: 32px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            border-radius: 8px;
+            background: transparent;
+            border: 1px solid var(--border);
+            cursor: pointer;
+            color: var(--text);
+        }
+        .btn-icon:hover { background: var(--hover-bg); }
         
         a { color: var(--primary); text-decoration: none; }
     </style>
@@ -249,11 +299,36 @@
             <!-- 车账号管理 -->
             <div id="accountsSection" class="section active">
                 <div class="stats-grid" id="accountStats"></div>
+
+                <div class="table-container" style="margin-bottom: 1rem;">
+                    <div class="table-header">
+                        <span class="title">邀请成员加入 Team</span>
+                        <span class="text-muted">（直接发送邮件邀请，无需邀请码）</span>
+                    </div>
+                    <div class="card-body">
+                        <div class="form-row" style="margin-bottom:0;">
+                            <label style="flex: 2; min-width: 240px;">
+                                <span>成员邮箱</span>
+                                <input type="email" id="adminInviteEmail" placeholder="member@example.com" autocomplete="email">
+                            </label>
+                            <label style="flex: 1; min-width: 220px;">
+                                <span>车账号</span>
+                                <select id="adminInviteTeamAccount" style="width:100%;">
+                                    <option value="">自动选择可用车位</option>
+                                </select>
+                            </label>
+                            <div style="display:flex; align-items:flex-end; gap:0.5rem;">
+                                <button class="btn btn-primary" onclick="sendAdminInvite()">发送邀请</button>
+                            </div>
+                        </div>
+                        <div id="adminInviteStatus" class="text-muted" style="margin-top:0.5rem;"></div>
+                    </div>
+                </div>
                 
                 <div class="table-container">
-	                    <div class="table-header">
-	                        <span class="title">车账号列表 <span class="text-muted" style="font-weight:400;">（自动同步：每 3 小时）</span></span>
-	                        <div class="table-actions">
+		                    <div class="table-header">
+		                        <span class="title">车账号列表 <span class="text-muted" style="font-weight:400;">（自动同步：每 3 小时）</span></span>
+		                        <div class="table-actions">
 	                            <button class="btn btn-primary" onclick="showAddAccount()">+ 添加车账号</button>
 	                            <button class="btn btn-ghost" onclick="syncAllAccounts()">同步</button>
 	                        </div>
@@ -267,13 +342,13 @@
                                 <th>最后同步</th>
                                 <th>状态</th>
                                 <th>操作</th>
-                            </tr>
-                        </thead>
-                        <tbody id="accountList"></tbody>
-                    </table>
-                    <div id="accountForm" class="edit-form hidden"></div>
-                </div>
-            </div>
+	                            </tr>
+	                        </thead>
+	                        <tbody id="accountList"></tbody>
+	                    </table>
+	                    <div id="accountForm" class="edit-form modal-overlay hidden"></div>
+	                </div>
+	            </div>
 
             <!-- 邀请码管理 -->
             <div id="codesSection" class="section">
@@ -435,10 +510,10 @@
         }
 
         // ========== 车账号 ==========
-        async function loadAccounts() {
-            const { ok, data } = await api('/admin/team-accounts');
-            if (!ok) return;
-            accounts = data.accounts || [];
+	        async function loadAccounts() {
+	            const { ok, data } = await api('/admin/team-accounts');
+	            if (!ok) return;
+	            accounts = data.accounts || [];
             
             // 统计
             const statsHtml = accounts.length > 0 ? accounts.map(acc => `
@@ -477,25 +552,74 @@
 		                </tr>
 		            `;
                     }).join('');
-            
-            // 更新邀请码生成的下拉框
-            updateCodeTeamSelect();
-        }
+	            
+	            // 更新邀请码生成的下拉框
+	            updateCodeTeamSelect();
+                updateInviteTeamSelect();
+	        }
 
-        function updateCodeTeamSelect() {
-            const select = document.getElementById('codeTeamAccount');
-            select.innerHTML = '<option value="">不绑定车位</option>' + 
-                accounts.filter(a => a.enabled).map(a => 
-                    `<option value="${a.id}">${a.name}${a.authStatus && a.authStatus !== 'valid' ? '（' + (a.authStatus==='invalid'?'失效':a.authStatus==='missing'?'未配置':'未验证') + '）' : ''}</option>`
-                ).join('');
-        }
+	        function updateCodeTeamSelect() {
+	            const select = document.getElementById('codeTeamAccount');
+	            select.innerHTML = '<option value="">不绑定车位</option>' + 
+	                accounts.filter(a => a.enabled).map(a => 
+	                    `<option value="${a.id}">${a.name}${a.authStatus && a.authStatus !== 'valid' ? '（' + (a.authStatus==='invalid'?'失效':a.authStatus==='missing'?'未配置':'未验证') + '）' : ''}</option>`
+	                ).join('');
+	        }
 
-        function setAccountSessionStatus(message, isError = false) {
-            const el = document.getElementById('accSessionStatus');
-            if (!el) return;
-            el.textContent = message || '';
-            el.className = isError ? 'text-danger' : 'text-muted';
-        }
+            function updateInviteTeamSelect() {
+                const select = document.getElementById('adminInviteTeamAccount');
+                if (!select) return;
+                select.innerHTML = '<option value="">自动选择可用车位</option>' +
+                    accounts.filter(a => a.enabled).map(a =>
+                        `<option value="${a.id}">${a.name}${a.authStatus && a.authStatus !== 'valid' ? '（' + (a.authStatus==='invalid'?'失效':a.authStatus==='missing'?'未配置':'未验证') + '）' : ''}</option>`
+                    ).join('');
+            }
+
+            function setAdminInviteStatus(message, isError = false) {
+                const el = document.getElementById('adminInviteStatus');
+                if (!el) return;
+                el.textContent = message || '';
+                el.className = isError ? 'text-danger' : 'text-muted';
+            }
+
+            async function sendAdminInvite() {
+                const emailEl = document.getElementById('adminInviteEmail');
+                const teamEl = document.getElementById('adminInviteTeamAccount');
+                const email = (emailEl?.value || '').trim().toLowerCase();
+                const teamVal = (teamEl?.value || '').trim();
+
+                if (!email || !email.includes('@')) {
+                    setAdminInviteStatus('请输入有效邮箱', true);
+                    emailEl?.focus();
+                    return;
+                }
+
+                const teamAccountId = teamVal ? parseInt(teamVal, 10) : null;
+                setAdminInviteStatus('发送中…');
+                const res = await api('/admin/invite', {
+                    method: 'POST',
+                    body: JSON.stringify({ email, teamAccountId })
+                });
+                if (!res.ok) {
+                    setAdminInviteStatus(res.data?.error || '发送失败', true);
+                    return;
+                }
+
+                const teamName = res.data?.teamAccount?.name || '';
+                setAdminInviteStatus(`已发送邀请：${email}${teamName ? `（车位：${teamName}）` : ''}`);
+                if (emailEl) {
+                    emailEl.value = '';
+                    emailEl.focus();
+                }
+                loadAccounts();
+            }
+
+	        function setAccountSessionStatus(message, isError = false) {
+	            const el = document.getElementById('accSessionStatus');
+	            if (!el) return;
+                el.textContent = message || '';
+                el.className = isError ? 'text-danger' : 'text-muted';
+            }
 
         function normalizeBearerToken(token) {
             const t = (token || '').trim();
@@ -624,23 +748,40 @@
 	            return true;
 	        }
 
-        function bindAccountSessionJsonAutoParse() {
-            const sessionEl = document.getElementById('accSessionJson');
-            if (!sessionEl) return;
-            let timer = null;
-            const run = () => tryFillAccountCredentialsFromSessionJson();
-            sessionEl.addEventListener('input', () => {
-                clearTimeout(timer);
-                timer = setTimeout(run, 150);
-            });
-            sessionEl.addEventListener('blur', run);
-        }
+	        function bindAccountSessionJsonAutoParse() {
+	            const sessionEl = document.getElementById('accSessionJson');
+	            if (!sessionEl) return;
+	            let timer = null;
+	            const run = () => tryFillAccountCredentialsFromSessionJson();
+	            sessionEl.addEventListener('input', () => {
+	                clearTimeout(timer);
+	                timer = setTimeout(run, 150);
+	            });
+	            sessionEl.addEventListener('blur', run);
+	        }
+
+            let _accountFormEscHandler = null;
+            function openAccountFormModal(innerHtml) {
+                const form = document.getElementById('accountForm');
+                if (!form) return;
+                form.classList.remove('hidden');
+                form.innerHTML = innerHtml || '';
+                document.body.style.overflow = 'hidden';
+                form.onclick = (e) => { if (e.target === form) hideAccountForm(); };
+                if (!_accountFormEscHandler) {
+                    _accountFormEscHandler = (e) => { if (e.key === 'Escape') hideAccountForm(); };
+                    document.addEventListener('keydown', _accountFormEscHandler);
+                }
+            }
 
 	        function showAddAccount() {
-	            const form = document.getElementById('accountForm');
-	            form.classList.remove('hidden');
-	            form.innerHTML = `
-	                <h3>添加车账号</h3>
+	            openAccountFormModal(`
+                    <div class="modal-card" role="dialog" aria-modal="true">
+                        <div class="modal-header">
+                            <h3>添加车账号</h3>
+                            <button class="btn-icon" onclick="hideAccountForm()" title="关闭"><i class="bi bi-x-lg"></i></button>
+                        </div>
+                        <div class="modal-content">
 	                <div class="form-row">
 	                    <label><span>名称</span><input type="text" id="accName" placeholder="车位名称"></label>
 	                    <label><span>最大席位</span><input type="number" id="accMaxSeats" value="5" min="1"></label>
@@ -666,18 +807,23 @@
                     <button class="btn btn-ghost" onclick="hideAccountForm()">取消</button>
                     <button class="btn btn-primary" onclick="saveAccount()">保存</button>
                 </div>
-            `;
+                        </div>
+                    </div>
+                `);
             bindAccountSessionJsonAutoParse();
         }
 
 	        function editAccount(id) {
 	            const acc = accounts.find(a => a.id === id);
 	            if (!acc) return;
-	            const form = document.getElementById('accountForm');
-	            form.classList.remove('hidden');
 	            const hasCreds = Boolean((acc.authorizationToken || '').trim() || (acc.accountId || '').trim());
-	            form.innerHTML = `
-	                <h3>编辑车账号</h3>
+	            openAccountFormModal(`
+                    <div class="modal-card" role="dialog" aria-modal="true">
+                        <div class="modal-header">
+                            <h3>编辑车账号</h3>
+                            <button class="btn-icon" onclick="hideAccountForm()" title="关闭"><i class="bi bi-x-lg"></i></button>
+                        </div>
+                        <div class="modal-content">
 	                <input type="hidden" id="accId" value="${acc.id}">
 	                <input type="hidden" id="accEmail" value="${acc.accountEmail || ''}">
 	                <div class="form-row">
@@ -711,12 +857,23 @@
                     <button class="btn btn-success" onclick="syncAccount(${acc.id})">同步状态</button>
                     <button class="btn btn-primary" onclick="saveAccount()">保存</button>
                 </div>
-            `;
+                        </div>
+                    </div>
+                `);
             bindAccountSessionJsonAutoParse();
         }
 
         function hideAccountForm() {
-            document.getElementById('accountForm').classList.add('hidden');
+            const form = document.getElementById('accountForm');
+            if (!form) return;
+            form.classList.add('hidden');
+            form.innerHTML = '';
+            form.onclick = null;
+            document.body.style.overflow = '';
+            if (_accountFormEscHandler) {
+                document.removeEventListener('keydown', _accountFormEscHandler);
+                _accountFormEscHandler = null;
+            }
         }
 
 	        async function saveAccount() {
@@ -1081,6 +1238,9 @@
         });
         document.getElementById('totpCode').addEventListener('keypress', (e) => {
             if (e.key === 'Enter') login();
+        });
+        document.getElementById('adminInviteEmail')?.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') sendAdminInvite();
         });
 
         // 检查登录状态
